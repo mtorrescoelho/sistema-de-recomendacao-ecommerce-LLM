@@ -1,10 +1,21 @@
 import pandas as pd
 import numpy as np
+import torch
 from sklearn.metrics import precision_score, recall_score, f1_score
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
 from datasets import Dataset
 
-MODEL_NAME = "neuralmind/bert-base-portuguese-cased" 
+# Caminho para o modelo que foi feito download
+MODEL_NAME = "modelo-feedback"
+# Carrega o modelo treinado
+tokenizer_feedback = AutoTokenizer.from_pretrained(MODEL_NAME)
+modelo_feedback = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+
+def classificar_feedback(texto):
+    inputs = tokenizer_feedback(texto, return_tensors="pt", truncation=True, padding=True)
+    outputs = modelo_feedback(**inputs)
+    probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+    return probs[0][1].item()  # Probabilidade de ser positivo
 
 # 1. Carregar e unir os dados
 def carregar_dados():
@@ -77,6 +88,9 @@ def avaliar(trainer, val_dataset):
 def pipeline_modelo():
     df = carregar_dados()
     df = preparar_dados(df)
+    # Filtra apenas os feedbacks positivos
+    df = df[df['Descricao'].apply(classificar_feedback) > 0.7]  
+
     tokenizer, model = carregar_modelo()
     dataset = tokenizar_textos(df, tokenizer)
     trainer, val_dataset = treinar_modelo(dataset, model)
