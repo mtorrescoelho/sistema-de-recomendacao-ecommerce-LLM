@@ -1,3 +1,16 @@
+"""
+Pré-processamento Inteligente de Dados para Recomendação de Livros
+==================================================================
+
+Este módulo realiza:
+1. Limpeza e normalização avançada de textos (descrições, feedbacks)
+2. Tratamento de valores nulos e remoção de inconsistências
+3. Conversão e padronização de variáveis numéricas e categóricas
+4. Tokenização e vetorização dos textos (TF-IDF)
+5. Geração de variáveis derivadas para análise e modelagem
+
+Ideal para preparar dados para sistemas de recomendação e análise preditiva.
+"""
 import pandas as pd
 import numpy as np
 import re
@@ -44,12 +57,15 @@ def limpar_dados_livros(df):
 
     df = df.dropna(subset=colunas_necessarias)
     df['Categoria'] = df['Categoria'].astype(str).str.lower().str.strip()
+    df['Titulo'] = df['Titulo'].astype(str).apply(normalizar_texto)  # <-- minúsculas no título
+    df['Descricao'] = df['Descricao'].apply(limpar_descricao).apply(normalizar_texto)  # <-- minúsculas na descrição
+
 
     categorias_invalidas = ['default', 'n/a', 'sem categoria', 'desconhecido', 'add a comment', 'none', '']
-    df = df[~df['Categoria'].isin(categorias_invalidas)]
+    df = df[~df['Categoria'].isin(categorias_invalidas)] # remove categorias inválidas
 
-    df['Preco'] = df['Preco'].astype(str).str.replace(',', '.', regex=False).astype(float)
-    df['Avaliacao'] = pd.to_numeric(df['Avaliacao'], errors='coerce').fillna(0).astype(int)
+    df['Preco'] = df['Preco'].astype(str).str.replace(',', '.', regex=False).astype(float) # converte preços para float
+    df['Avaliacao'] = pd.to_numeric(df['Avaliacao'], errors='coerce').fillna(0).astype(int) # converte avaliações para int
 
     df['Descricao'] = df['Descricao'].apply(limpar_descricao)
 
@@ -130,8 +146,10 @@ if __name__ == "__main__":
     livros = pd.read_csv("dados/livros.csv")
     feedbacks = pd.read_csv("dados/feedbacks.csv")
 
+# Normalizar os textos para minúsculas e limpeza
     livros_limpos = limpar_dados_livros(livros)
     livros_limpos.to_csv("dados/livros_limpos.csv", index=False)
+    feedbacks['Feedback_Texto'] = feedbacks['Feedback_Texto'].astype(str).apply(normalizar_texto)
 
     df = pd.merge(feedbacks, livros_limpos, on="ID_Produto", how="left")
     resultados = preprocessar_dados(df)

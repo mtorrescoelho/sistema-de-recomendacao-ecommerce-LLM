@@ -1,3 +1,16 @@
+"""
+Análise Exploratória e Visualização de Dados de Livros e Feedbacks
+==================================================================
+
+Este módulo executa:
+1. Estatísticas descritivas e análise de vendas/categorias
+2. Visualização de tendências e padrões de compra ao longo do tempo
+3. Análise da distribuição de preços e categorias
+4. Geração de gráficos e relatórios para apoio à decisão
+
+Ideal para entender o comportamento dos utilizadores e o desempenho dos produtos.
+"""
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
