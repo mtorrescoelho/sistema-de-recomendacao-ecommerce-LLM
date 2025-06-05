@@ -1,13 +1,29 @@
 # api/main.py
+"""
+API do Sistema Avançado de Recomendação de Livros
+=================================================
+
+Este módulo implementa:
+
+1. Ponto de entrada da API FastAPI para o sistema de recomendação.
+2. Inicialização e integração dos módulos de personalização e refinamento do core.
+3. Endpoints para:
+   - Geração de recomendações personalizadas de livros
+   - Registo de feedback do utilizador
+   - Consulta de histórico de interações
+   - Listagem de categorias disponíveis
+   - Consulta de estatísticas do sistema
+4. Suporte a aprendizado contínuo e personalização dinâmica baseada em feedback e padrões de uso.
+
+Ideal para servir recomendações de livros altamente relevantes e adaptadas a cada utilizador, através de uma interface web moderna e escalável.
+"""
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import List, Optional
-import sys
-import os
-
-# Adicionar o diretório raiz ao path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+#import sys
+#import os
+#sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.models import (
     RecomendacaoRequest, 
@@ -15,7 +31,7 @@ from api.models import (
     FeedbackRequest,
     StatusResponse
 )
-from core.recomendador import RecomendadorMelhorado
+from core.recomendador import Recomendador
 from utils.data_loader import DataLoader
 from utils.logger import setup_logger
 
@@ -54,7 +70,7 @@ async def startup_event():
         dados = data_loader.carregar_todos_dados()
         
         # Inicializar recomendador
-        recomendador = RecomendadorMelhorado(dados)
+        recomendador = Recomendador(dados)
         await recomendador.inicializar()
         
         logger.info("Sistema inicializado com sucesso!")

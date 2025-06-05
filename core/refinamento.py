@@ -1,5 +1,16 @@
-from datetime import datetime
+"""
+Sistema de Refinamento de Recomendações
+=======================================
 
+Este módulo implementa:
+1. Carregamento e gestão de dados agregados de análise (livros, feedbacks, categorias, sazonalidade, etc.)
+2. Métodos para refinar e priorizar listas de recomendações com base em padrões de popularidade, sazonalidade, top produtos e preferências de preço.
+3. Suporte à personalização dinâmica dos resultados para sistemas de recomendação.
+
+Ideal para melhorar a relevância e personalização das recomendações finais apresentadas ao utilizador.
+"""
+
+from datetime import datetime
 
 class SistemaRefinamento:
     def __init__(self):

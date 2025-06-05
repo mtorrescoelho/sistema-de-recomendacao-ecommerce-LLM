@@ -1,4 +1,17 @@
 # core/recomendador.py
+"""
+Sistema Avançado de Personalização de Recomendações
+===================================================
+
+Este módulo implementa:
+1. Geração de recomendações personalizadas com embeddings semânticos e histórico do utilizador
+2. Integração de personalização baseada em preferências, feedback e padrões comportamentais
+3. Suporte a explicações, tags e estatísticas detalhadas para cada recomendação
+4. Otimização contínua do sistema com cache, análise de padrões e feedback do utilizador
+
+Ideal para oferecer recomendações altamente relevantes e adaptadas a cada utilizador.
+"""
+
 import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
@@ -15,15 +28,24 @@ from api.models import RecomendacaoResponse, TipoFeedback
 from core.personalizacao import SistemaPersonalizacao
 from core.refinamento import SistemaRefinamento
 from utils.text_processor import TextProcessor
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import torch
+
+class SistemaPersonalizacao:
+    def __init__(self):
+        model_dir = "caminho/para/resultados"
+        self.bert_model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+        self.bert_tokenizer = AutoTokenizer.from_pretrained(model_dir)
+
+    def prever_sentimento(self, texto):
+        inputs = self.bert_tokenizer(texto, return_tensors="pt", truncation=True, padding=True)
+        with torch.no_grad():
+            outputs = self.bert_model(**inputs)
+            probs = outputs.logits.softmax(dim=1)
+            classe = probs.argmax(dim=1).item()
+        return classe  # 0=Negativo, 1=Neutro, 2=Positivo
 
 class RecomendadorMelhorado:
-    """
-    Sistema de recomendação avançado que integra:
-    - Embeddings semânticos
-    - Personalização baseada em histórico
-    - Refinamento contínuo com feedback
-    - Análise de padrões comportamentais
-    """
     
     def __init__(self, dados: Dict[str, pd.DataFrame]):
         self.dados = dados
@@ -32,6 +54,7 @@ class RecomendadorMelhorado:
         self.analise_dados = dados.get('analise', {})
         
         # Componentes do sistema
+        # Inicialização dos sistemas de personalização e refinamento
         self.modelo = None
         self.text_processor = TextProcessor()
         self.personalizacao = SistemaPersonalizacao()
@@ -60,6 +83,7 @@ class RecomendadorMelhorado:
         """Inicialização assíncrona do sistema"""
         try:
             self.logger.info("Carregando modelo de embeddings...")
+            #carrega o modelo para gerar embeddings semânticos
             self.modelo = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
             
             self.logger.info("Carregando cache de embeddings...")

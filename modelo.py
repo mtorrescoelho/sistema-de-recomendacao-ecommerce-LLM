@@ -9,549 +9,197 @@ Este módulo implementa um sistema completo que:
 4. Validação robusta com múltiplas métricas
 
 """
-
+import os
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 from transformers import (
     AutoTokenizer, AutoModel, AutoModelForSequenceClassification,
-    TrainingArguments, Trainer, get_linear_schedule_with_warmup
+    TrainingArguments, Trainer
 )
 from datasets import Dataset
+from datasets import ClassLabel
+import torch
+import torch.nn as nn
 import logging
-from typing import Dict, List, Tuple, Optional
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-# Configurar logging
+#Configura o sistema de logging do Python para mostrar mensagens de log
+#Serve para monitorar e depurar a execução do seu código, mostrando mensagens úteis durante o treino, avaliação, etc.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 1. Seleção automática do modelo LLM
+def selecionar_modelo(df, idioma='pt'):
+    return "bert-base-multilingual-cased"
+
+# 2. Modelo multimodal (texto + padrões de compra)
 class ModeloMultimodal(nn.Module):
-    """
-    Modelo que combina análise de texto com features comportamentais
-    para capturar padrões de compra E preferências
-    """
-    
     def __init__(self, model_name: str, num_labels: int = 3, behavioral_features: int = 6):
         super().__init__()
-        
-        # Componente textual (BERT/RoBERTa)
-        self.text_encoder = AutoModel.from_pretrained(model_name)
-        self.text_dim = self.text_encoder.config.hidden_size
-        
-        # Componente comportamental
-        self.behavioral_dim = behavioral_features
-        self.behavioral_encoder = nn.Sequential(
-            nn.Linear(behavioral_features, 128),
+        self.text_encoder = AutoModel.from_pretrained(model_name)  # Carrega o modelo de linguagem pré-treinado
+        self.text_dim = self.text_encoder.config.hidden_size #transforma o texto em um vetor de características (embedding).
+        self.behavioral_encoder = nn.Sequential(  # Camada para processar as features comportamentais(transforma as features comportamentais num vetor)
+            nn.Linear(behavioral_features, 64),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2)
+            nn.Linear(64, 32),
+            nn.ReLU()
         )
-        
-        # Camada de fusão
-        self.fusion_dim = self.text_dim + 64
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(self.fusion_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3)
+        self.fusion_layer = nn.Sequential( # Camada de fusão para combinar as features textuais e comportamentais
+            nn.Linear(self.text_dim + 32, 64),
+            nn.ReLU()
         )
-        
-        # Classificador final
-        self.classifier = nn.Linear(128, num_labels)
-        
-    def forward(self, input_ids, attention_mask, behavioral_features, labels=None):
-        # Encoding do texto
-        text_outputs = self.text_encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        text_features = text_outputs.pooler_output  # [batch_size, hidden_size]
-        
-        # Encoding comportamental
-        behavioral_encoded = self.behavioral_encoder(behavioral_features)
-        
-        # Fusão das features
-        combined_features = torch.cat([text_features, behavioral_encoded], dim=1)
-        fused_features = self.fusion_layer(combined_features)
-        
-        # Classificação
-        logits = self.classifier(fused_features)
-        
-        outputs = {"logits": logits}
-        
-        if labels is not None:
+        self.classifier = nn.Linear(64, num_labels) #  pega o vetor combinado e gera as probabilidades para cada classe (negativo, neutro, positivo)
+
+    def forward(self, input_ids, attention_mask, behavioral_features, labels=None): # passagem dos dados
+        text_outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask) 
+        text_features = text_outputs.pooler_output # o texto é processado pelo encoder e o pooler_output é usado como representação do texto
+        behavioral_encoded = self.behavioral_encoder(behavioral_features) # transforma as features comportamentais num vetor de características
+        combined = torch.cat([text_features, behavioral_encoded], dim=1) #os dois vetores formam um vetor combinado
+        fused = self.fusion_layer(combined) #o vetor combinado é passado pela camada de fusão
+        logits = self.classifier(fused) #o vetor é passado pela camada de classificação para gerar as probabilidades
+        outputs = {"logits": logits} # dicionário de saída com as probabilidades
+        if labels is not None: # se as labels forem fornecidas, calcula a perda
             loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(logits, labels)
             outputs["loss"] = loss
-            
         return outputs
 
+# 3. Carregar e unir os dados
+def carregar_dados():
+    df_feedbacks = pd.read_csv("dados/feedbacks.csv")
+    df_livros = pd.read_csv("dados/livros_limpos.csv")
+    df = df_feedbacks.merge(df_livros[['ID_Produto', 'Categoria']], on="ID_Produto", how="left")
+    #cat_pop = pd.read_csv("outputs_p/categorias_populares.csv")['Categoria'].tolist()
+    #top_prod = pd.read_csv("outputs_p/top_produtos.csv")['Titulo'].tolist()
 
-class SeletorModelo:
-    """Classe para seleção inteligente do modelo LLM mais adequado"""
-    
-    MODELOS_DISPONIVEIS = {
-        'bert_multilingual': 'bert-base-multilingual-cased',
-        'roberta_sentiment': 'cardiffnlp/twitter-roberta-base-sentiment-latest',
-        'bert_portuguese': 'neuralmind/bert-base-portuguese-cased',
-        'distilbert': 'distilbert-base-uncased',
-    }
-    
-    @classmethod
-    def selecionar_modelo_otimo(cls, dados_amostra: pd.DataFrame, idioma: str = 'pt') -> str:
-        """
-        Seleciona o modelo mais adequado baseado nos dados e requisitos
-        """
-        logger.info("Selecionando modelo LLM adequado...")
-        
-        # Análise dos dados
-        tamanho_dataset = len(dados_amostra)
-        complexidade_texto = dados_amostra['Feedback_Texto'].str.len().mean()
-        
-        # Critérios de seleção
-        if idioma == 'pt' and tamanho_dataset > 1000:
-            modelo_escolhido = cls.MODELOS_DISPONIVEIS['bert_portuguese']
-            razao = "Dataset grande em português - BERT Portuguese otimizado"
-        elif tamanho_dataset < 500:
-            modelo_escolhido = cls.MODELOS_DISPONIVEIS['distilbert']
-            razao = "Dataset pequeno - DistilBERT mais eficiente"
-        elif complexidade_texto > 200:
-            modelo_escolhido = cls.MODELOS_DISPONIVEIS['bert_multilingual']
-            razao = "Textos complexos - BERT Multilingual robusto"
-        else:
-            modelo_escolhido = cls.MODELOS_DISPONIVEIS['roberta_sentiment']
-            razao = "Análise de sentimentos - RoBERTa especializado"
-        
-        logger.info(f"✓ Modelo selecionado: {modelo_escolhido}")
-        logger.info(f"  Razão: {razao}")
-        
-        return modelo_escolhido
-
-
-class ProcessadorAvancado:
-    """Processador que extrai padrões de compra e preferências"""
-    
-    def __init__(self):
-        self.scaler_comportamental = StandardScaler()
-        self.encoder_categoria = LabelEncoder()
-        
-    def extrair_features_comportamentais(self, df: pd.DataFrame) -> np.ndarray:
-        """Extrai e normaliza features comportamentais"""
-        logger.info("Extraindo padrões de comportamento...")
-        
-        features_comportamentais = []
-        
-        # 1. Padrões temporais
-        if 'intervalo_medio_dias' in df.columns:
-            features_comportamentais.append(df['intervalo_medio_dias'].fillna(0))
-        
-        # 2. Padrões financeiros
-        if 'valor_medio_por_compra' in df.columns:
-            features_comportamentais.append(df['valor_medio_por_compra'].fillna(0))
-        
-        # 3. Frequência de avaliações (proxy para engagement)
-        df['freq_avaliacoes'] = df.groupby('ID_Utilizador')['ID_Utilizador'].transform('count')
-        features_comportamentais.append(df['freq_avaliacoes'])
-        
-        # 4. Diversidade de categorias
-        df['diversidade_categorias'] = df.groupby('ID_Utilizador')['Categoria'].transform('nunique')
-        features_comportamentais.append(df['diversidade_categorias'])
-        
-        # 5. Score de avaliação médio por utilizador
-        df['media_avaliacoes_user'] = df.groupby('ID_Utilizador')['Avaliacao'].transform('mean')
-        features_comportamentais.append(df['media_avaliacoes_user'])
-        
-        # 6. Variabilidade nas avaliações (consistência)
-        df['std_avaliacoes_user'] = df.groupby('ID_Utilizador')['Avaliacao'].transform('std').fillna(0)
-        features_comportamentais.append(df['std_avaliacoes_user'])
-        
-        # Combinar features
-        features_array = np.column_stack(features_comportamentais)
-        
-        # Normalizar
-        features_normalizadas = self.scaler_comportamental.fit_transform(features_array)
-        
-        logger.info(f"✓ Features comportamentais extraídas: {features_normalizadas.shape}")
-        return features_normalizadas
-    
-    def criar_labels_multiplas(self, df: pd.DataFrame) -> np.ndarray:
-        """Cria labels mais nuançadas que capturam preferências"""
-        # 0: Negativo (avaliação <= 2)
-        # 1: Neutro (avaliação == 3)
-        # 2: Positivo (avaliação >= 4)
-        
-        labels = df['Avaliacao'].apply(
-            lambda x: 0 if x <= 2 else (1 if x == 3 else 2)
-        )
-        
-        logger.info(f"Distribuição de labels:")
-        for i, nome in enumerate(['Negativo', 'Neutro', 'Positivo']):
-            count = (labels == i).sum()
-            logger.info(f"  {nome}: {count} ({count/len(labels)*100:.1f}%)")
-        
-        return labels.values
-
-
-class TreinadorAvancado:
-    """Treinador com otimização de hiperparâmetros e transfer learning"""
-    
-    def __init__(self, modelo_nome: str):
-        self.modelo_nome = modelo_nome
-        self.melhores_params = None
-        
-    def otimizar_hiperparametros(self, dataset_treino: Dataset) -> Dict:
-        """Otimização de hiperparâmetros usando validação cruzada"""
-        logger.info("Otimizando hiperparâmetros...")
-        
-        # Grid de hiperparâmetros
-        param_grid = {
-            'learning_rate': [1e-5, 2e-5, 3e-5, 5e-5],
-            'batch_size': [8, 16, 32],
-            'num_epochs': [3, 4, 5],
-            'warmup_ratio': [0.1, 0.2]
-        }
-        
-        melhor_score = 0
-        melhores_params = {}
-        
-        # Busca simplificada (na prática, usar Optuna ou similar)
-        for lr in param_grid['learning_rate'][:2]:  # Limitado para exemplo
-            for bs in param_grid['batch_size'][:2]:
-                for epochs in param_grid['num_epochs'][:2]:
-                    
-                    # Treino rápido para avaliação
-                    score = self._treino_rapido(dataset_treino, lr, bs, epochs)
-                    
-                    if score > melhor_score:
-                        melhor_score = score
-                        melhores_params = {
-                            'learning_rate': lr,
-                            'batch_size': bs,
-                            'num_epochs': epochs,
-                            'warmup_ratio': 0.1
-                        }
-        
-        self.melhores_params = melhores_params
-        logger.info(f"✓ Melhores parâmetros: {melhores_params}")
-        logger.info(f"✓ Melhor score: {melhor_score:.4f}")
-        
-        return melhores_params
-    
-    def _treino_rapido(self, dataset: Dataset, lr: float, bs: int, epochs: int) -> float:
-        """Treino rápido para avaliação de hiperparâmetros"""
-        try:
-            # Subset pequeno para avaliação rápida
-            subset_size = min(500, len(dataset))
-            dataset_subset = dataset.select(range(subset_size))
-            train_test = dataset_subset.train_test_split(test_size=0.2)
-            
-            # Modelo simples para teste
-            modelo = AutoModelForSequenceClassification.from_pretrained(
-                self.modelo_nome, num_labels=3
-            )
-            
-            args = TrainingArguments(
-                output_dir="./temp_results",
-                per_device_train_batch_size=bs,
-                num_train_epochs=1,  # Apenas 1 epoch para velocidade
-                learning_rate=lr,
-                logging_steps=50,
-                evaluation_strategy="no",
-                save_strategy="no"
-            )
-            
-            trainer = Trainer(
-                model=modelo,
-                args=args,
-                train_dataset=train_test['train']
-            )
-            
-            trainer.train()
-            
-            # Avaliação rápida
-            results = trainer.evaluate(train_test['test'])
-            return results.get('eval_loss', float('inf')) * -1  # Converter para score positivo
-            
-        except Exception as e:
-            logger.warning(f"Erro no treino rápido: {e}")
-            return 0.0
-    
-    def treinar_modelo_final(self, 
-                            train_dataset: Dataset, 
-                            val_dataset: Dataset,
-                            features_comportamentais: bool = True) -> Trainer:
-        """Treina o modelo final com os melhores parâmetros"""
-        
-        logger.info("Treinando modelo final...")
-        
-        if features_comportamentais:
-            # Usar modelo multimodal
-            modelo = ModeloMultimodal(self.modelo_nome, num_labels=3)
-        else:
-            # Usar modelo padrão
-            modelo = AutoModelForSequenceClassification.from_pretrained(
-                self.modelo_nome, num_labels=3
-            )
-        
-        # Usar melhores parâmetros ou padrões
-        params = self.melhores_params or {
-            'learning_rate': 2e-5,
-            'batch_size': 16,
-            'num_epochs': 3,
-            'warmup_ratio': 0.1
-        }
-        
-        args = TrainingArguments(
-            output_dir="./results_final",
-            per_device_train_batch_size=params['batch_size'],
-            per_device_eval_batch_size=params['batch_size'],
-            num_train_epochs=params['num_epochs'],
-            learning_rate=params['learning_rate'],
-            warmup_ratio=params['warmup_ratio'],
-            evaluation_strategy="epoch",
-            save_strategy="epoch",
-            logging_steps=10,
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_f1",
-            greater_is_better=True,
-            report_to=None
-        )
-        
-        def compute_metrics(eval_pred):
-            predictions, labels = eval_pred
-            predictions = np.argmax(predictions, axis=1)
-            
-            from sklearn.metrics import accuracy_score, f1_score
-            return {
-                'accuracy': accuracy_score(labels, predictions),
-                'f1': f1_score(labels, predictions, average='weighted')
-            }
-        
-        trainer = Trainer(
-            model=modelo,
-            args=args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-            compute_metrics=compute_metrics
-        )
-        
-        # Implementar transfer learning gradual
-        self._transfer_learning_gradual(trainer)
-        
-        trainer.train()
-        logger.info("✓ Treino final concluído")
-        
-        return trainer
-    
-    def _transfer_learning_gradual(self, trainer: Trainer):
-        """Implementa transfer learning com descongelamento gradual"""
-        logger.info("Aplicando transfer learning gradual...")
-        
-        # Congelar camadas iniciais
-        if hasattr(trainer.model, 'text_encoder'):
-            # Modelo multimodal
-            for param in trainer.model.text_encoder.embeddings.parameters():
-                param.requires_grad = False
-        elif hasattr(trainer.model, 'bert'):
-            # Modelo BERT padrão
-            for param in trainer.model.bert.embeddings.parameters():
-                param.requires_grad = False
-
-
-class ValidadorRobusto:
-    """Validação robusta com múltiplas métricas e visualizações"""
-    
-    def __init__(self):
-        self.resultados_validacao = {}
-    
-    def validacao_cruzada_estratificada(self, 
-                                       dados: pd.DataFrame, 
-                                       labels: np.ndarray,
-                                       modelo_nome: str,
-                                       k_folds: int = 5) -> Dict:
-        """Validação cruzada estratificada"""
-        logger.info(f"Executando validação cruzada {k_folds}-fold...")
-        
-        skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
-        scores = {'accuracy': [], 'f1_macro': [], 'f1_weighted': []}
-        
-        for fold, (train_idx, val_idx) in enumerate(skf.split(dados, labels)):
-            logger.info(f"Fold {fold + 1}/{k_folds}")
-            
-            # Divisão dos dados
-            train_data = dados.iloc[train_idx]
-            val_data = dados.iloc[val_idx]
-            train_labels = labels[train_idx]
-            val_labels = labels[val_idx]
-            
-            # Treino rápido para este fold
-            score = self._avaliar_fold(train_data, val_data, train_labels, val_labels, modelo_nome)
-            
-            for metric, value in score.items():
-                scores[metric].append(value)
-        
-        # Calcular médias e desvios
-        resultados = {}
-        for metric, values in scores.items():
-            resultados[f'{metric}_mean'] = np.mean(values)
-            resultados[f'{metric}_std'] = np.std(values)
-        
-        logger.info("Resultados da validação cruzada:")
-        for metric, value in resultados.items():
-            logger.info(f"  {metric}: {value:.4f}")
-        
-        return resultados
-    
-    def _avaliar_fold(self, train_data, val_data, train_labels, val_labels, modelo_nome):
-        """Avalia um fold específico"""
-        # Implementação simplificada para exemplo
-        from sklearn.dummy import DummyClassifier
-        from sklearn.metrics import accuracy_score, f1_score
-        
-        # Usar classifier dummy para exemplo rápido
-        dummy = DummyClassifier(strategy='most_frequent')
-        dummy.fit(train_data[['Avaliacao']], train_labels)
-        preds = dummy.predict(val_data[['Avaliacao']])
-        
-        return {
-            'accuracy': accuracy_score(val_labels, preds),
-            'f1_macro': f1_score(val_labels, preds, average='macro'),
-            'f1_weighted': f1_score(val_labels, preds, average='weighted')
-        }
-    
-    def avaliar_modelo_final(self, trainer: Trainer, test_dataset: Dataset) -> Dict:
-        """Avaliação final com métricas detalhadas"""
-        logger.info("Executando avaliação final...")
-        
-        # Predições
-        predictions = trainer.predict(test_dataset)
-        pred_labels = np.argmax(predictions.predictions, axis=1)
-        true_labels = predictions.label_ids
-        
-        # Métricas detalhadas
-        from sklearn.metrics import (
-            accuracy_score, precision_recall_fscore_support,
-            confusion_matrix, classification_report
-        )
-        
-        accuracy = accuracy_score(true_labels, pred_labels)
-        precision, recall, f1, support = precision_recall_fscore_support(
-            true_labels, pred_labels, average=None
-        )
-        
-        # Matriz de confusão
-        cm = confusion_matrix(true_labels, pred_labels)
-        
-        # Relatório completo
-        report = classification_report(
-            true_labels, pred_labels,
-            target_names=['Negativo', 'Neutro', 'Positivo'],
-            output_dict=True
-        )
-        
-        resultados = {
-            'accuracy': accuracy,
-            'precision_macro': np.mean(precision),
-            'recall_macro': np.mean(recall),
-            'f1_macro': np.mean(f1),
-            'f1_weighted': f1_score(true_labels, pred_labels, average='weighted'),
-            'confusion_matrix': cm.tolist(),
-            'classification_report': report
-        }
-        
-        # Log detalhado
-        logger.info("=== AVALIAÇÃO FINAL ===")
-        logger.info(f"Accuracy: {accuracy:.4f}")
-        logger.info(f"F1 Macro: {np.mean(f1):.4f}")
-        logger.info(f"F1 Weighted: {resultados['f1_weighted']:.4f}")
-        
-        return resultados
-    
-    def gerar_visualizacoes(self, resultados: Dict):
-        """Gera visualizações dos resultados"""
-        logger.info("Gerando visualizações...")
-        
-        # Matriz de confusão
-        if 'confusion_matrix' in resultados:
-            plt.figure(figsize=(8, 6))
-            sns.heatmap(
-                resultados['confusion_matrix'],
-                annot=True,
-                fmt='d',
-                cmap='Blues',
-                xticklabels=['Negativo', 'Neutro', 'Positivo'],
-                yticklabels=['Negativo', 'Neutro', 'Positivo']
-            )
-            plt.title('Matriz de Confusão')
-            plt.ylabel('Verdadeiro')
-            plt.xlabel('Predito')
-            plt.tight_layout()
-            plt.savefig('confusion_matrix.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            logger.info("✓ Matriz de confusão salva em 'confusion_matrix.png'")
-
-
-def pipeline_completo():
-    """Pipeline completo que cumpre todas as tarefas solicitadas"""
-    
-    logger.info("=== INICIANDO PIPELINE AVANÇADO ===")
-    
+    # Padrões de compra por utilizador
     try:
-        # 1. Carregar dados
-        df_feedbacks = pd.read_csv("dados/feedbacks.csv")
-        df_livros = pd.read_csv("dados/livros_limpos.csv")
-        df = df_feedbacks.merge(df_livros[['ID_Produto', 'Categoria']], on="ID_Produto", how="left")
-        
-        # 2. SELEÇÃO DO MODELO LLM ADEQUADO
-        modelo_otimo = SeletorModelo.selecionar_modelo_otimo(df, idioma='pt')
-        
-        # 3. Processamento avançado
-        processador = ProcessadorAvancado()
-        features_comportamentais = processador.extrair_features_comportamentais(df)
-        labels = processador.criar_labels_multiplas(df)
-        
-        # 4. FINE-TUNING COM TRANSFER LEARNING OTIMIZADO
-        treinador = TreinadorAvancado(modelo_otimo)
-        
-        # Preparar datasets (simplificado)
-        train_data, test_data = train_test_split(df, test_size=0.2, stratify=labels)
-        
-        # 5. VALIDAÇÃO ROBUSTA
-        validador = ValidadorRobusto()
-        
-        # Validação cruzada
-        resultados_cv = validador.validacao_cruzada_estratificada(
-            train_data, labels[:len(train_data)], modelo_otimo
-        )
-        
-        logger.info("=== PIPELINE CONCLUÍDO ===")
-        logger.info("✅ Modelo LLM selecionado adequadamente")
-        logger.info("✅ Fine-tuning implementado")
-        logger.info("✅ Padrões de compra capturados")
-        logger.info("✅ Transfer learning otimizado")
-        logger.info("✅ Validação robusta executada")
-        
-        return resultados_cv
-        
-    except Exception as e:
-        logger.error(f"Erro no pipeline: {e}")
-        return None
+        df_intervalo = pd.read_csv("outputs_p/intervalo_medio_entre_compras.csv")
+        df = df.merge(df_intervalo, on="ID_Utilizador", how="left")
+    except FileNotFoundError:
+        df['intervalo_medio_dias'] = np.nan
+    try:
+        df_valor_medio = pd.read_csv("outputs_p/valor_medio_por_compra.csv")
+        df = df.merge(df_valor_medio, on="ID_Utilizador", how="left")
+    except FileNotFoundError:
+        df['valor_medio_por_compra'] = np.nan
+    return df
 
+# 4. Extrair features comportamentais
+def extrair_features_comportamentais(df):
+    features = []
+    # 1. intervalo_medio_dias
+    features.append(df['intervalo_medio_dias'].fillna(df['intervalo_medio_dias'].mean()))
+    # 2. valor_medio_por_compra
+    features.append(df['valor_medio_por_compra'].fillna(df['valor_medio_por_compra'].mean()))
+    # 3. Frequência de avaliações por utilizador
+    df['freq_avaliacoes'] = df.groupby('ID_Utilizador')['ID_Utilizador'].transform('count')
+    features.append(df['freq_avaliacoes'])
+    # 4. Diversidade de categorias por utilizador
+    #para cada utilizador, conta quantas categorias diferentes de livros ele já avaliou/comprou
+    df['diversidade_categorias'] = df.groupby('ID_Utilizador')['Categoria'].transform('nunique')
+    features.append(df['diversidade_categorias'])
+    # 5. Média das avaliações do utilizador
+    df['media_avaliacoes_user'] = df.groupby('ID_Utilizador')['Avaliacao'].transform('mean')
+    features.append(df['media_avaliacoes_user'])
+    # 6. Desvio padrão das avaliações do utilizador
+    df['std_avaliacoes_user'] = df.groupby('ID_Utilizador')['Avaliacao'].transform('std').fillna(0)
+    features.append(df['std_avaliacoes_user'])
+    #df['is_categoria_popular'] = df['Categoria'].isin(cat_pop).astype(int)
+    #features.append(df['is_categoria_popular'])
+    #df['is_top_produto'] = df['Titulo'].isin(top_prod).astype(int)
+    #features.append(df['is_top_produto'])
+    # Stack
+    features_array = np.column_stack(features)
+    scaler = StandardScaler()
+    features_norm = scaler.fit_transform(features_array)
+    return features_norm
+
+# 5. Criar labels (preferências textuais)
+def criar_labels(df):
+    # 0: Negativo (<=2), 1: Neutro (==3), 2: Positivo (>=4)
+    return df['Avaliacao'].apply(lambda x: 0 if x <= 2 else (1 if x == 3 else 2)).values
+
+# 6. Tokenização
+def tokenizar_textos(df, tokenizer):
+    dataset = Dataset.from_pandas(df)
+    dataset = dataset.map(lambda e: tokenizer(e['Feedback_Texto'], truncation=True, padding='max_length'), batched=True)
+    return dataset
+
+# 7. Treinar modelo (apenas texto ou multimodal)
+def treinar_modelo(train_dataset, val_dataset, model_name, multimodal=False, features_comportamentais=None):
+    if multimodal and features_comportamentais is not None:
+        model = ModeloMultimodal(model_name, num_labels=3, behavioral_features=features_comportamentais.shape[1])
+        # Aqui seria necessário adaptar o Trainer para multimodal (não trivial, mas possível)
+        # Para simplificação, vamos treinar só texto, mas o modelo multimodal está pronto para expansão
+        logger.info("⚠️  Treinamento multimodal não implementado no Trainer padrão. Usando apenas texto.")
+        model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=3)
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=3)
+
+    os.environ["WANDB_DISABLED"] = "true"
+    args = TrainingArguments(
+        output_dir="./resultados",
+        # evaluation_strategy="epoch",  
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=3,
+        save_strategy="epoch",
+        logging_steps=10,
+        learning_rate=2e-5
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+    )
+
+    trainer.train()
+    trainer.save_model("./resultados")  # <-- Adiciona esta linha para guardar o modelo treinado
+    return trainer
+
+# 8. Avaliação robusta
+def avaliar(trainer, val_dataset):
+    preds = trainer.predict(val_dataset)
+    pred_labels = np.argmax(preds.predictions, axis=1)
+    true_labels = preds.label_ids
+
+    print(classification_report(true_labels, pred_labels, target_names=['Negativo', 'Neutro', 'Positivo']))
+    print("Matriz de confusão:")
+    print(confusion_matrix(true_labels, pred_labels))
+    print(f"F1 macro: {f1_score(true_labels, pred_labels, average='macro'):.2f}")
+    print(f"F1 weighted: {f1_score(true_labels, pred_labels, average='weighted'):.2f}")
+    print(f"Accuracy: {accuracy_score(true_labels, pred_labels):.2f}")
+
+# 9. Pipeline completo
+def pipeline_completo():
+    logger.info("=== INICIANDO PIPELINE ===")
+    df = carregar_dados()
+    model_name = selecionar_modelo(df, idioma='pt')
+    logger.info(f"Modelo selecionado: {model_name}")
+    features_comportamentais = extrair_features_comportamentais(df)
+    labels = criar_labels(df)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    dataset = tokenizar_textos(df, tokenizer)
+    dataset = dataset.add_column("label", labels)
+
+    # Converter a coluna "label" para ClassLabel
+    class_label = ClassLabel(num_classes=3, names=['Negativo', 'Neutro', 'Positivo'])
+    dataset = dataset.cast_column("label", class_label)
+
+    # Split estratificado
+    train_test = dataset.train_test_split(test_size=0.2, stratify_by_column="label")
+    train_dataset = train_test['train']
+    val_dataset = train_test['test']
+    # Treinar modelo (texto)
+    trainer = treinar_modelo(train_dataset, val_dataset, model_name, multimodal=False, features_comportamentais=features_comportamentais)
+    # Avaliação
+    avaliar(trainer, val_dataset)
+    logger.info("=== PIPELINE CONCLUÍDO ===")
 
 if __name__ == "__main__":
-    resultados = pipeline_completo()
-    if resultados:
-        print("Pipeline executado com sucesso!")
-    else:
-        print("Pipeline falhou!")
+    pipeline_completo()
