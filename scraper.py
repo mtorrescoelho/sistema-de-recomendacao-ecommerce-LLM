@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import os  
 import time
 
+
 # Diretório de saída para os ficheiros CSV
 output_dir = 'dados'  # [ADICIONADO]
 os.makedirs(output_dir, exist_ok=True)
@@ -106,6 +107,8 @@ def scrapear_livros():
                 'Disponibilidade': disponibilidade
             })
             id_produto += 1
+            
+            time.sleep(1)
 
     # Guardar para CSV
     guardar_csv_livros(books) 
@@ -167,16 +170,20 @@ def gerar_feedbacks(livros):
         num_feedbacks = random.choices([0, 1, 3, 5, 10, 15], weights=[10, 5, 25, 20, 15, 5])[0]
         
         for _ in range(num_feedbacks):
-            user_id = random.randint(1, 100) # ou outro aleatório
+            user_id = random.randint(1, 100)
             produto_id = livro['ID_Produto']
-            
-        # Escolha de sentimento com base no número de feedbacks do produto
-            if num_feedbacks >= 10:
-                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[60, 30, 10])[0]
-            elif num_feedbacks <= 1:
-                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[30, 40, 30])[0]
+
+            # Escolha de sentimento com base na avaliação do livro
+            avaliacao_livro = livro['Avaliacao']
+            if avaliacao_livro >= 4:
+                # Livro com avaliação alta: mais chance de feedback bom
+                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[70, 20, 10])[0]
+            elif avaliacao_livro == 3:
+                # Livro com avaliação média: distribuição equilibrada
+                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[30, 50, 20])[0]
             else:
-                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[50, 30, 20])[0]
+                # Livro com avaliação baixa: mais chance de feedback mau
+                sentimento = random.choices(['bom', 'medio', 'mau'], weights=[10, 30, 60])[0]
 
             if sentimento == 'bom':
                 texto = random.choice(feedback_bom)
@@ -188,7 +195,6 @@ def gerar_feedbacks(livros):
                 texto = random.choice(feedback_mau)
                 estrelas = random.randint(1, 2)
 
-            
             data_feedback = datetime.now() - timedelta(days=random.randint(0, 365))
             data_compra = data_feedback - timedelta(days=random.randint(1, 30))
 
@@ -199,8 +205,8 @@ def gerar_feedbacks(livros):
                 'Avaliacao': estrelas,
                 'Data_Feedback': data_feedback.strftime('%Y-%m-%d'),
                 'Data_Compra': data_compra.strftime('%Y-%m-%d'),
-
             })
+
             
     caminho_feedback = os.path.join(output_dir, 'feedbacks.csv')
     # Guardar feedbacks em CSV
