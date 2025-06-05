@@ -81,5 +81,5 @@ def main():
             break
         print("\n" + responder_com_chatbot(pergunta, livros_df, feedbacks_df, modelo))
 
-if name == "main":
+if __name__ == "__main__":
     main()
